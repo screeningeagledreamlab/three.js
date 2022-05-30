@@ -58,7 +58,7 @@ class SpriteNodeMaterial extends NodeMaterial {
 		const alignedPosition = mul( positionLocal.xy, scale );
 		const rotation = this.rotationNode || materialRotation;
 
-		let rotatedPosition = vec2(
+		const rotatedPosition = vec2(
 			sub( mul( cos( rotation ), alignedPosition.x ), mul( sin( rotation ), alignedPosition.y ) ),
 			add( mul( sin( rotation ), alignedPosition.x ), mul( cos( rotation ), alignedPosition.y ) )
 		);
