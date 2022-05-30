@@ -3,7 +3,7 @@
  * Copyright 2010-2022 Three.js Authors
  * SPDX-License-Identifier: MIT
  */
-const REVISION = '141';
+const REVISION = '142dev';
 const MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
 const TOUCH = { ROTATE: 0, PAN: 1, DOLLY_PAN: 2, DOLLY_ROTATE: 3 };
 const CullFaceNone = 0;
@@ -9269,21 +9269,6 @@ class Material extends EventDispatcher {
 
 	}
 
-	// @deprecated since r131, f5803c62cc4a29d90744e9dc7811d086e354c1d8
-
-	get vertexTangents() {
-
-		console.warn( 'THREE.' + this.type + ': .vertexTangents has been removed.' );
-		return false;
-
-	}
-
-	set vertexTangents( value ) {
-
-		console.warn( 'THREE.' + this.type + ': .vertexTangents has been removed.' );
-
-	}
-
 }
 
 Material.fromType = function ( /*type*/ ) {
@@ -12948,6 +12933,278 @@ function WebGLAttributes( gl, capabilities ) {
 		get: get,
 		remove: remove,
 		update: update
+
+	};
+
+}
+
+/**
+ * @author simon paris / https://github.com/simon-paris
+ */
+
+/*
+Browser WebGL2 Query source code:
+Chrome (js bindings): https://github.com/chromium/chromium/blob/206c0777170302d87809a0dd87e77a9e8901521f/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+Chrome (gpu process): https://github.com/chromium/chromium/blob/d5f73ba89a508cc9c9e40aa279f68eca82e4f1ce/gpu/command_buffer/service/query_manager.cc
+Firefox: https://github.com/mozilla/gecko/blob/feab53c7f23345feb767b8094a42d1fe6767c888/dom/canvas/WebGLQuery.cpp
+Angle (public api): https://github.com/google/angle/blob/3fd614d06e50fb98d1434fabf31e8583516ad5c1/src/libANGLE/renderer/gl/ContextGL.cpp
+Angle (opengl): https://github.com/google/angle/blob/master/src/libANGLE/renderer/gl/QueryGL.cpp
+Angle (dx9): https://github.com/google/angle/blob/master/src/libANGLE/renderer/d3d/d3d9/Query9.cpp
+Angle (dx11): https://github.com/google/angle/blob/master/src/libANGLE/renderer/d3d/d3d11/Query11.cpp
+Angle (vulkan): https://github.com/google/angle/blob/master/src/libANGLE/renderer/vulkan/QueryVk.cpp
+Webkit (stubs): https://github.com/WebKit/webkit/blob/89c28d471fae35f1788a0f857067896a10af8974/Source/WebCore/html/canvas/WebGLQuery.cpp
+*/
+
+var REASON_AUTO = 1;
+var REASON_MANUAL_ALL = 2;
+var REASON_MANUAL_ONE = 3;
+
+function WebGLQueries( _gl, info, capabilities ) {
+
+	// map from OcclusionQueryMesh objects to objects like:
+	// {
+	//   alive: [queryObject...], // queries that are being being run or pending response
+	//   idle: [queryObject...] // query objects that are not alive
+	// }
+	// Where queryObject looks like
+	// {
+	//   mesh: null, // points back to the mesh object
+	//   query: null, // the webgl query object
+	//   frame: 0, // the frame number on which the query was initiated
+	//   lastChecked: 0, // the frame number on which the query response was polled
+	//   camera: null, // the camera used to render the query mesh
+	// }
+	const occlusionQueryMeshStates = new Map();
+
+
+	function pollQueriesHandler( event ) {
+
+		var queryObjects = occlusionQueryMeshStates.get( event.target );
+		if ( queryObjects ) {
+
+			checkOcclusionQueryStatus( queryObjects.alive, queryObjects.idle, null, REASON_MANUAL_ONE );
+
+		}
+
+	}
+
+	function disposeHandler( event ) {
+
+		var queryObjects = occlusionQueryMeshStates.get( event.target );
+		occlusionQueryMeshStates.delete( event.target );
+		if ( queryObjects ) {
+
+			disposeOcclusionQueries( queryObjects.alive );
+			disposeOcclusionQueries( queryObjects.idle );
+
+		}
+
+	}
+
+	function disposeOcclusionQueries( list ) {
+
+		if ( ! capabilities.isWebGL2 ) return;
+		for ( var i = 0; i < list.length; i ++ ) {
+
+			_gl.deleteQuery( list[ i ].query );
+
+		}
+
+	}
+
+	this.occlusionQueryStart = function ( occlusionQueryMesh, camera ) {
+
+		var queryObjects = occlusionQueryMeshStates.get( occlusionQueryMesh );
+		if ( ! queryObjects ) {
+
+			queryObjects = { alive: [], idle: [] };
+			occlusionQueryMeshStates.set( occlusionQueryMesh, queryObjects );
+			occlusionQueryMesh.addEventListener( 'dispose', disposeHandler );
+			occlusionQueryMesh.addEventListener( 'pollQueries', pollQueriesHandler );
+
+		}
+
+		if ( occlusionQueryMesh.cameraFilter ) {
+
+			var cameraMatches = 0;
+			for ( var i = 0; i < occlusionQueryMesh.cameraFilter.length; i ++ ) {
+
+				cameraMatches += occlusionQueryMesh.cameraFilter[ i ] === camera;
+
+			}
+
+			if ( ! cameraMatches ) {
+
+				checkOcclusionQueryStatus( queryObjects.alive, queryObjects.idle, camera, REASON_AUTO );
+				return false;
+
+			}
+
+		}
+
+		if ( ! capabilities.isWebGL2 ) {
+
+			console.error( 'WebGLQueries: Using OcclusionQueryMeshes in your scene is only allowed in WebGL2. You can set OcclusionQueryMesh.cameraFilter=[] to disable it.' );
+			return false;
+
+		}
+
+		if ( Array.isArray( occlusionQueryMesh.material ) && occlusionQueryMesh.geometry.groups && occlusionQueryMesh.geometry.groups.length > 1 ) {
+
+			console.error( 'WebGLQueries: Do not do occlusion queries using Multi-Materials.' );
+
+		}
+
+		checkOcclusionQueryStatus( queryObjects.alive, queryObjects.idle, camera, REASON_AUTO );
+
+		var numAlive = 0;
+		for ( var i = 0; i < queryObjects.alive.length; i ++ ) {
+
+			numAlive += queryObjects.alive[ i ].camera === camera;
+
+		}
+
+		if ( numAlive < occlusionQueryMesh.maxAliveQueries ) {
+
+			var queryInfo = queryObjects.idle.pop() || {
+				mesh: null,
+				lastChecked: 0,
+				frame: 0,
+				camera: null,
+				query: _gl.createQuery(),
+			};
+			queryInfo.mesh = occlusionQueryMesh;
+			// the query is 'checked' this frame, because we already know that the result is unavailable til the end of the frame
+			queryInfo.lastChecked = info.render.frame;
+			queryInfo.frame = info.render.frame;
+			queryInfo.camera = camera;
+			queryObjects.alive.push( queryInfo );
+
+			_gl.beginQuery( 35887, queryInfo.query );
+			return true;
+
+		}
+
+		return false;
+
+	};
+
+	this.occlusionQueryEnd = function () {
+
+		if ( ! capabilities.isWebGL2 ) return;
+		_gl.endQuery( 35887 );
+
+	};
+
+	function checkOcclusionQueryStatus( alive, idle, camera, reason ) {
+
+		if ( ! capabilities.isWebGL2 ) return;
+
+		var i = 0;
+		var j = 0;
+		var frame = info.render.frame;
+
+		while ( i < alive.length ) {
+
+			var queryObject = alive[ i ];
+
+			if ( camera !== null && camera !== queryObject.camera ) {
+
+				// filtering by camera makes the order of callbacks more predictable
+				i ++;
+				j ++;
+				continue;
+
+			}
+
+			if ( queryObject.lastChecked === frame && reason === REASON_AUTO ) {
+
+				// Checking the query on the same frame it's issued or multiple times in the
+				// same frame is guarenteed to fail, so ignore requests to check the result in those cases.
+				// User initiated checks are probably not initiated during rendering, so don't ignore those.
+				// https://www.khronos.org/registry/webgl/specs/latest/2.0/#3.7.12
+				i ++;
+				j ++;
+				continue;
+
+			}
+
+			queryObject.lastChecked = frame;
+
+			// backwards logic - get the query result without checking if it's available. If it's true, we know it was available.
+			// If it's false, we don't know so we check. This reduces the total number of gl calls.
+			var success = false;
+			var available = true;
+			success = _gl.getQueryParameter( queryObject.query, 34918 ) > 0;
+			if ( ! success ) {
+
+				available = _gl.getQueryParameter( queryObject.query, 34919 );
+
+			}
+
+			if ( queryObject.mesh.occlusionQueryCallback && available ) {
+
+				queryObject.mesh.occlusionQueryCallback( success, queryObject.frame, queryObject.camera );
+
+			}
+
+			alive[ j ] = queryObject;
+
+			if ( available === true ) {
+
+				queryObject.frame = 0;
+				queryObject.camera = null;
+				if ( idle ) {
+
+					idle.push( queryObject );
+
+				}
+
+			} else {
+
+				j ++;
+
+			}
+
+			i ++;
+
+		}
+
+		alive.length = j;
+
+	}
+
+	this.pollAllOcclusionQueries = function () {
+
+		var statesArrays = [];
+		return function ( auto ) {
+
+			statesArrays.length = 0;
+
+			occlusionQueryMeshStates.forEach( function ( value ) {
+
+				statesArrays.push( value );
+
+			} );
+
+			for ( var i = 0; i < statesArrays.length; i ++ ) {
+
+				checkOcclusionQueryStatus( statesArrays[ i ].alive, statesArrays[ i ].idle, null, auto ? REASON_AUTO : REASON_MANUAL_ALL );
+
+			}
+
+		};
+
+	}();
+
+	this.dispose = function () {
+
+		occlusionQueryMeshStates.forEach( function ( value ) {
+
+			disposeOcclusionQueries( value.alive );
+			disposeOcclusionQueries( value.idle );
+
+		} );
 
 	};
 
@@ -20652,7 +20909,7 @@ function WebGLRenderStates( extensions, capabilities ) {
 
 	let renderStates = new WeakMap();
 
-	function get( scene, renderCallDepth = 0 ) {
+	function get( scene, renderCallDepth ) {
 
 		let renderState;
 
@@ -21093,6 +21350,18 @@ function WebGLShadowMap( _renderer, _objects, _capabilities ) {
 			result.referencePosition.setFromMatrixPosition( light.matrixWorld );
 			result.nearDistance = shadowCameraNear;
 			result.farDistance = shadowCameraFar;
+
+		}
+
+		if ( object.isOcclusionQueryMesh ) {
+
+			result.depthWrite = material.colorWrite; // yes colorWrite
+			result.colorWrite = material.colorWrite;
+
+		} else {
+
+			result.depthWrite = true;
+			result.colorWrite = true;
 
 		}
 
@@ -26531,7 +26800,7 @@ function WebGLRenderer( parameters = {} ) {
 	}
 
 	let extensions, capabilities, state, info;
-	let properties, textures, cubemaps, cubeuvmaps, attributes, geometries, objects;
+	let properties, textures, cubemaps, cubeuvmaps, attributes, geometries, objects, queries;
 	let programCache, materials, renderLists, renderStates, clipping, shadowMap;
 
 	let background, morphtargets, bufferRenderer, indexedBufferRenderer;
@@ -26558,6 +26827,7 @@ function WebGLRenderer( parameters = {} ) {
 		attributes = new WebGLAttributes( _gl, capabilities );
 		bindingStates = new WebGLBindingStates( _gl, extensions, attributes, capabilities );
 		geometries = new WebGLGeometries( _gl, attributes, info, bindingStates );
+		queries = new WebGLQueries( _gl, info, capabilities );
 		objects = new WebGLObjects( _gl, geometries, attributes, info );
 		morphtargets = new WebGLMorphtargets( _gl, capabilities, textures );
 		clipping = new WebGLClipping( properties );
@@ -26817,6 +27087,12 @@ function WebGLRenderer( parameters = {} ) {
 
 	};
 
+	this.pollAllOcclusionQueries = function () {
+
+		queries.pollAllOcclusionQueries( false );
+
+	};
+
 	//
 
 	this.dispose = function () {
@@ -26833,6 +27109,7 @@ function WebGLRenderer( parameters = {} ) {
 		objects.dispose();
 		bindingStates.dispose();
 		programCache.dispose();
+		queries.dispose();
 
 		xr.dispose();
 
@@ -27051,6 +27328,13 @@ function WebGLRenderer( parameters = {} ) {
 
 		}
 
+		var didQuery = false;
+		if ( object.isOcclusionQueryMesh ) {
+
+			didQuery = queries.occlusionQueryStart( object, camera );
+
+		}
+
 		if ( object.isInstancedMesh ) {
 
 			renderer.renderInstances( drawStart, drawCount, object.count );
@@ -27064,6 +27348,12 @@ function WebGLRenderer( parameters = {} ) {
 		} else {
 
 			renderer.render( drawStart, drawCount );
+
+		}
+
+		if ( didQuery ) {
+
+			queries.occlusionQueryEnd();
 
 		}
 
@@ -27124,6 +27414,9 @@ function WebGLRenderer( parameters = {} ) {
 
 		renderStateStack.pop();
 		currentRenderState = null;
+
+		// check any occlusion query meshes that were removed from the scene while their queries were still pending
+		queries.pollAllOcclusionQueries( true );
 
 	};
 
@@ -30516,6 +30809,42 @@ function testPoint( point, index, localThresholdSq, matrixWorld, raycaster, inte
 	}
 
 }
+
+/**
+ * @author simon paris / https://github.com/simon-paris
+ */
+
+function OcclusionQueryMesh() {
+
+	Mesh.apply( this, arguments );
+
+	this.type = 'OcclusionQueryMesh';
+
+	this.occlusionQueryCallback = null;
+	this.cameraFilter = null;
+	this.maxAliveQueries = 1;
+
+}
+
+OcclusionQueryMesh.prototype = Object.assign( Object.create( Mesh.prototype ), {
+
+	constructor: OcclusionQueryMesh,
+
+	isOcclusionQueryMesh: true,
+
+	pollQueries: function () {
+
+		this.dispatchEvent( { type: 'pollQueries' } );
+
+	},
+
+	dispose: function () {
+
+		this.dispatchEvent( { type: 'dispose' } );
+
+	}
+
+} );
 
 class VideoTexture extends Texture {
 
@@ -48916,4 +49245,4 @@ if ( typeof window !== 'undefined' ) {
 
 }
 
-export { ACESFilmicToneMapping, AddEquation, AddOperation, AdditiveAnimationBlendMode, AdditiveBlending, AlphaFormat, AlwaysDepth, AlwaysStencilFunc, AmbientLight, AmbientLightProbe, AnimationClip, AnimationLoader, AnimationMixer, AnimationObjectGroup, AnimationUtils, ArcCurve, ArrayCamera, ArrowHelper, Audio, AudioAnalyser, AudioContext, AudioListener, AudioLoader, AxesHelper, BackSide, BasicDepthPacking, BasicShadowMap, Bone, BooleanKeyframeTrack, Box2, Box3, Box3Helper, BoxGeometry as BoxBufferGeometry, BoxGeometry, BoxHelper, BufferAttribute, BufferGeometry, BufferGeometryLoader, ByteType, Cache, Camera, CameraHelper, CanvasTexture, CapsuleGeometry as CapsuleBufferGeometry, CapsuleGeometry, CatmullRomCurve3, CineonToneMapping, CircleGeometry as CircleBufferGeometry, CircleGeometry, ClampToEdgeWrapping, Clock, Color, ColorKeyframeTrack, ColorManagement, CompressedTexture, CompressedTextureLoader, ConeGeometry as ConeBufferGeometry, ConeGeometry, CubeCamera, CubeReflectionMapping, CubeRefractionMapping, CubeTexture, CubeTextureLoader, CubeUVReflectionMapping, CubicBezierCurve, CubicBezierCurve3, CubicInterpolant, CullFaceBack, CullFaceFront, CullFaceFrontBack, CullFaceNone, Curve, CurvePath, CustomBlending, CustomToneMapping, CylinderGeometry as CylinderBufferGeometry, CylinderGeometry, Cylindrical, Data3DTexture, DataArrayTexture, DataTexture, DataTexture2DArray, DataTexture3D, DataTextureLoader, DataUtils, DecrementStencilOp, DecrementWrapStencilOp, DefaultLoadingManager, DepthFormat, DepthStencilFormat, DepthTexture, DirectionalLight, DirectionalLightHelper, DiscreteInterpolant, DodecahedronGeometry as DodecahedronBufferGeometry, DodecahedronGeometry, DoubleSide, DstAlphaFactor, DstColorFactor, DynamicCopyUsage, DynamicDrawUsage, DynamicReadUsage, EdgesGeometry, EllipseCurve, EqualDepth, EqualStencilFunc, EquirectangularReflectionMapping, EquirectangularRefractionMapping, Euler, EventDispatcher, ExtrudeGeometry as ExtrudeBufferGeometry, ExtrudeGeometry, FileLoader, FlatShading, Float16BufferAttribute, Float32BufferAttribute, Float64BufferAttribute, FloatType, Fog, FogExp2, Font, FontLoader, FramebufferTexture, FrontSide, Frustum, GLBufferAttribute, GLSL1, GLSL3, GreaterDepth, GreaterEqualDepth, GreaterEqualStencilFunc, GreaterStencilFunc, GridHelper, Group, HalfFloatType, HemisphereLight, HemisphereLightHelper, HemisphereLightProbe, IcosahedronGeometry as IcosahedronBufferGeometry, IcosahedronGeometry, ImageBitmapLoader, ImageLoader, ImageUtils, ImmediateRenderObject, IncrementStencilOp, IncrementWrapStencilOp, InstancedBufferAttribute, InstancedBufferGeometry, InstancedInterleavedBuffer, InstancedMesh, Int16BufferAttribute, Int32BufferAttribute, Int8BufferAttribute, IntType, InterleavedBuffer, InterleavedBufferAttribute, Interpolant, InterpolateDiscrete, InterpolateLinear, InterpolateSmooth, InvertStencilOp, KeepStencilOp, KeyframeTrack, LOD, LatheGeometry as LatheBufferGeometry, LatheGeometry, Layers, LessDepth, LessEqualDepth, LessEqualStencilFunc, LessStencilFunc, Light, LightProbe, Line, Line3, LineBasicMaterial, LineCurve, LineCurve3, LineDashedMaterial, LineLoop, LineSegments, LinearEncoding, LinearFilter, LinearInterpolant, LinearMipMapLinearFilter, LinearMipMapNearestFilter, LinearMipmapLinearFilter, LinearMipmapNearestFilter, LinearSRGBColorSpace, LinearToneMapping, Loader, LoaderUtils, LoadingManager, LoopOnce, LoopPingPong, LoopRepeat, LuminanceAlphaFormat, LuminanceFormat, MOUSE, Material, MaterialLoader, MathUtils, Matrix3, Matrix4, MaxEquation, Mesh, MeshBasicMaterial, MeshDepthMaterial, MeshDistanceMaterial, MeshLambertMaterial, MeshMatcapMaterial, MeshNormalMaterial, MeshPhongMaterial, MeshPhysicalMaterial, MeshStandardMaterial, MeshToonMaterial, MinEquation, MirroredRepeatWrapping, MixOperation, MultiplyBlending, MultiplyOperation, NearestFilter, NearestMipMapLinearFilter, NearestMipMapNearestFilter, NearestMipmapLinearFilter, NearestMipmapNearestFilter, NeverDepth, NeverStencilFunc, NoBlending, NoColorSpace, NoToneMapping, NormalAnimationBlendMode, NormalBlending, NotEqualDepth, NotEqualStencilFunc, NumberKeyframeTrack, Object3D, ObjectLoader, ObjectSpaceNormalMap, OctahedronGeometry as OctahedronBufferGeometry, OctahedronGeometry, OneFactor, OneMinusDstAlphaFactor, OneMinusDstColorFactor, OneMinusSrcAlphaFactor, OneMinusSrcColorFactor, OrthographicCamera, PCFShadowMap, PCFSoftShadowMap, PMREMGenerator, ParametricGeometry, Path, PerspectiveCamera, Plane, PlaneGeometry as PlaneBufferGeometry, PlaneGeometry, PlaneHelper, PointLight, PointLightHelper, Points, PointsMaterial, PolarGridHelper, PolyhedronGeometry as PolyhedronBufferGeometry, PolyhedronGeometry, PositionalAudio, PropertyBinding, PropertyMixer, QuadraticBezierCurve, QuadraticBezierCurve3, Quaternion, QuaternionKeyframeTrack, QuaternionLinearInterpolant, REVISION, RGBADepthPacking, RGBAFormat, RGBAIntegerFormat, RGBA_ASTC_10x10_Format, RGBA_ASTC_10x5_Format, RGBA_ASTC_10x6_Format, RGBA_ASTC_10x8_Format, RGBA_ASTC_12x10_Format, RGBA_ASTC_12x12_Format, RGBA_ASTC_4x4_Format, RGBA_ASTC_5x4_Format, RGBA_ASTC_5x5_Format, RGBA_ASTC_6x5_Format, RGBA_ASTC_6x6_Format, RGBA_ASTC_8x5_Format, RGBA_ASTC_8x6_Format, RGBA_ASTC_8x8_Format, RGBA_BPTC_Format, RGBA_ETC2_EAC_Format, RGBA_PVRTC_2BPPV1_Format, RGBA_PVRTC_4BPPV1_Format, RGBA_S3TC_DXT1_Format, RGBA_S3TC_DXT3_Format, RGBA_S3TC_DXT5_Format, RGBFormat, RGB_ETC1_Format, RGB_ETC2_Format, RGB_PVRTC_2BPPV1_Format, RGB_PVRTC_4BPPV1_Format, RGB_S3TC_DXT1_Format, RGFormat, RGIntegerFormat, RawShaderMaterial, Ray, Raycaster, RectAreaLight, RedFormat, RedIntegerFormat, ReinhardToneMapping, RepeatWrapping, ReplaceStencilOp, ReverseSubtractEquation, RingGeometry as RingBufferGeometry, RingGeometry, SRGBColorSpace, Scene, ShaderChunk, ShaderLib, ShaderMaterial, ShadowMaterial, Shape, ShapeGeometry as ShapeBufferGeometry, ShapeGeometry, ShapePath, ShapeUtils, ShortType, Skeleton, SkeletonHelper, SkinnedMesh, SmoothShading, Source, Sphere, SphereGeometry as SphereBufferGeometry, SphereGeometry, Spherical, SphericalHarmonics3, SplineCurve, SpotLight, SpotLightHelper, Sprite, SpriteMaterial, SrcAlphaFactor, SrcAlphaSaturateFactor, SrcColorFactor, StaticCopyUsage, StaticDrawUsage, StaticReadUsage, StereoCamera, StreamCopyUsage, StreamDrawUsage, StreamReadUsage, StringKeyframeTrack, SubtractEquation, SubtractiveBlending, TOUCH, TangentSpaceNormalMap, TetrahedronGeometry as TetrahedronBufferGeometry, TetrahedronGeometry, TextGeometry, Texture, TextureLoader, TorusGeometry as TorusBufferGeometry, TorusGeometry, TorusKnotGeometry as TorusKnotBufferGeometry, TorusKnotGeometry, Triangle, TriangleFanDrawMode, TriangleStripDrawMode, TrianglesDrawMode, TubeGeometry as TubeBufferGeometry, TubeGeometry, UVMapping, Uint16BufferAttribute, Uint32BufferAttribute, Uint8BufferAttribute, Uint8ClampedBufferAttribute, Uniform, UniformsLib, UniformsUtils, UnsignedByteType, UnsignedInt248Type, UnsignedIntType, UnsignedShort4444Type, UnsignedShort5551Type, UnsignedShortType, VSMShadowMap, Vector2, Vector3, Vector4, VectorKeyframeTrack, VideoTexture, WebGL1Renderer, WebGL3DRenderTarget, WebGLArrayRenderTarget, WebGLCubeRenderTarget, WebGLMultipleRenderTargets, WebGLMultisampleRenderTarget, WebGLRenderTarget, WebGLRenderer, WebGLUtils, WireframeGeometry, WrapAroundEnding, ZeroCurvatureEnding, ZeroFactor, ZeroSlopeEnding, ZeroStencilOp, _SRGBAFormat, sRGBEncoding };
+export { ACESFilmicToneMapping, AddEquation, AddOperation, AdditiveAnimationBlendMode, AdditiveBlending, AlphaFormat, AlwaysDepth, AlwaysStencilFunc, AmbientLight, AmbientLightProbe, AnimationClip, AnimationLoader, AnimationMixer, AnimationObjectGroup, AnimationUtils, ArcCurve, ArrayCamera, ArrowHelper, Audio, AudioAnalyser, AudioContext, AudioListener, AudioLoader, AxesHelper, BackSide, BasicDepthPacking, BasicShadowMap, Bone, BooleanKeyframeTrack, Box2, Box3, Box3Helper, BoxGeometry as BoxBufferGeometry, BoxGeometry, BoxHelper, BufferAttribute, BufferGeometry, BufferGeometryLoader, ByteType, Cache, Camera, CameraHelper, CanvasTexture, CapsuleGeometry as CapsuleBufferGeometry, CapsuleGeometry, CatmullRomCurve3, CineonToneMapping, CircleGeometry as CircleBufferGeometry, CircleGeometry, ClampToEdgeWrapping, Clock, Color, ColorKeyframeTrack, ColorManagement, CompressedTexture, CompressedTextureLoader, ConeGeometry as ConeBufferGeometry, ConeGeometry, CubeCamera, CubeReflectionMapping, CubeRefractionMapping, CubeTexture, CubeTextureLoader, CubeUVReflectionMapping, CubicBezierCurve, CubicBezierCurve3, CubicInterpolant, CullFaceBack, CullFaceFront, CullFaceFrontBack, CullFaceNone, Curve, CurvePath, CustomBlending, CustomToneMapping, CylinderGeometry as CylinderBufferGeometry, CylinderGeometry, Cylindrical, Data3DTexture, DataArrayTexture, DataTexture, DataTexture2DArray, DataTexture3D, DataTextureLoader, DataUtils, DecrementStencilOp, DecrementWrapStencilOp, DefaultLoadingManager, DepthFormat, DepthStencilFormat, DepthTexture, DirectionalLight, DirectionalLightHelper, DiscreteInterpolant, DodecahedronGeometry as DodecahedronBufferGeometry, DodecahedronGeometry, DoubleSide, DstAlphaFactor, DstColorFactor, DynamicCopyUsage, DynamicDrawUsage, DynamicReadUsage, EdgesGeometry, EllipseCurve, EqualDepth, EqualStencilFunc, EquirectangularReflectionMapping, EquirectangularRefractionMapping, Euler, EventDispatcher, ExtrudeGeometry as ExtrudeBufferGeometry, ExtrudeGeometry, FileLoader, FlatShading, Float16BufferAttribute, Float32BufferAttribute, Float64BufferAttribute, FloatType, Fog, FogExp2, Font, FontLoader, FramebufferTexture, FrontSide, Frustum, GLBufferAttribute, GLSL1, GLSL3, GreaterDepth, GreaterEqualDepth, GreaterEqualStencilFunc, GreaterStencilFunc, GridHelper, Group, HalfFloatType, HemisphereLight, HemisphereLightHelper, HemisphereLightProbe, IcosahedronGeometry as IcosahedronBufferGeometry, IcosahedronGeometry, ImageBitmapLoader, ImageLoader, ImageUtils, ImmediateRenderObject, IncrementStencilOp, IncrementWrapStencilOp, InstancedBufferAttribute, InstancedBufferGeometry, InstancedInterleavedBuffer, InstancedMesh, Int16BufferAttribute, Int32BufferAttribute, Int8BufferAttribute, IntType, InterleavedBuffer, InterleavedBufferAttribute, Interpolant, InterpolateDiscrete, InterpolateLinear, InterpolateSmooth, InvertStencilOp, KeepStencilOp, KeyframeTrack, LOD, LatheGeometry as LatheBufferGeometry, LatheGeometry, Layers, LessDepth, LessEqualDepth, LessEqualStencilFunc, LessStencilFunc, Light, LightProbe, Line, Line3, LineBasicMaterial, LineCurve, LineCurve3, LineDashedMaterial, LineLoop, LineSegments, LinearEncoding, LinearFilter, LinearInterpolant, LinearMipMapLinearFilter, LinearMipMapNearestFilter, LinearMipmapLinearFilter, LinearMipmapNearestFilter, LinearSRGBColorSpace, LinearToneMapping, Loader, LoaderUtils, LoadingManager, LoopOnce, LoopPingPong, LoopRepeat, LuminanceAlphaFormat, LuminanceFormat, MOUSE, Material, MaterialLoader, MathUtils, Matrix3, Matrix4, MaxEquation, Mesh, MeshBasicMaterial, MeshDepthMaterial, MeshDistanceMaterial, MeshLambertMaterial, MeshMatcapMaterial, MeshNormalMaterial, MeshPhongMaterial, MeshPhysicalMaterial, MeshStandardMaterial, MeshToonMaterial, MinEquation, MirroredRepeatWrapping, MixOperation, MultiplyBlending, MultiplyOperation, NearestFilter, NearestMipMapLinearFilter, NearestMipMapNearestFilter, NearestMipmapLinearFilter, NearestMipmapNearestFilter, NeverDepth, NeverStencilFunc, NoBlending, NoColorSpace, NoToneMapping, NormalAnimationBlendMode, NormalBlending, NotEqualDepth, NotEqualStencilFunc, NumberKeyframeTrack, Object3D, ObjectLoader, ObjectSpaceNormalMap, OcclusionQueryMesh, OctahedronGeometry as OctahedronBufferGeometry, OctahedronGeometry, OneFactor, OneMinusDstAlphaFactor, OneMinusDstColorFactor, OneMinusSrcAlphaFactor, OneMinusSrcColorFactor, OrthographicCamera, PCFShadowMap, PCFSoftShadowMap, PMREMGenerator, ParametricGeometry, Path, PerspectiveCamera, Plane, PlaneGeometry as PlaneBufferGeometry, PlaneGeometry, PlaneHelper, PointLight, PointLightHelper, Points, PointsMaterial, PolarGridHelper, PolyhedronGeometry as PolyhedronBufferGeometry, PolyhedronGeometry, PositionalAudio, PropertyBinding, PropertyMixer, QuadraticBezierCurve, QuadraticBezierCurve3, Quaternion, QuaternionKeyframeTrack, QuaternionLinearInterpolant, REVISION, RGBADepthPacking, RGBAFormat, RGBAIntegerFormat, RGBA_ASTC_10x10_Format, RGBA_ASTC_10x5_Format, RGBA_ASTC_10x6_Format, RGBA_ASTC_10x8_Format, RGBA_ASTC_12x10_Format, RGBA_ASTC_12x12_Format, RGBA_ASTC_4x4_Format, RGBA_ASTC_5x4_Format, RGBA_ASTC_5x5_Format, RGBA_ASTC_6x5_Format, RGBA_ASTC_6x6_Format, RGBA_ASTC_8x5_Format, RGBA_ASTC_8x6_Format, RGBA_ASTC_8x8_Format, RGBA_BPTC_Format, RGBA_ETC2_EAC_Format, RGBA_PVRTC_2BPPV1_Format, RGBA_PVRTC_4BPPV1_Format, RGBA_S3TC_DXT1_Format, RGBA_S3TC_DXT3_Format, RGBA_S3TC_DXT5_Format, RGBFormat, RGB_ETC1_Format, RGB_ETC2_Format, RGB_PVRTC_2BPPV1_Format, RGB_PVRTC_4BPPV1_Format, RGB_S3TC_DXT1_Format, RGFormat, RGIntegerFormat, RawShaderMaterial, Ray, Raycaster, RectAreaLight, RedFormat, RedIntegerFormat, ReinhardToneMapping, RepeatWrapping, ReplaceStencilOp, ReverseSubtractEquation, RingGeometry as RingBufferGeometry, RingGeometry, SRGBColorSpace, Scene, ShaderChunk, ShaderLib, ShaderMaterial, ShadowMaterial, Shape, ShapeGeometry as ShapeBufferGeometry, ShapeGeometry, ShapePath, ShapeUtils, ShortType, Skeleton, SkeletonHelper, SkinnedMesh, SmoothShading, Source, Sphere, SphereGeometry as SphereBufferGeometry, SphereGeometry, Spherical, SphericalHarmonics3, SplineCurve, SpotLight, SpotLightHelper, Sprite, SpriteMaterial, SrcAlphaFactor, SrcAlphaSaturateFactor, SrcColorFactor, StaticCopyUsage, StaticDrawUsage, StaticReadUsage, StereoCamera, StreamCopyUsage, StreamDrawUsage, StreamReadUsage, StringKeyframeTrack, SubtractEquation, SubtractiveBlending, TOUCH, TangentSpaceNormalMap, TetrahedronGeometry as TetrahedronBufferGeometry, TetrahedronGeometry, TextGeometry, Texture, TextureLoader, TorusGeometry as TorusBufferGeometry, TorusGeometry, TorusKnotGeometry as TorusKnotBufferGeometry, TorusKnotGeometry, Triangle, TriangleFanDrawMode, TriangleStripDrawMode, TrianglesDrawMode, TubeGeometry as TubeBufferGeometry, TubeGeometry, UVMapping, Uint16BufferAttribute, Uint32BufferAttribute, Uint8BufferAttribute, Uint8ClampedBufferAttribute, Uniform, UniformsLib, UniformsUtils, UnsignedByteType, UnsignedInt248Type, UnsignedIntType, UnsignedShort4444Type, UnsignedShort5551Type, UnsignedShortType, VSMShadowMap, Vector2, Vector3, Vector4, VectorKeyframeTrack, VideoTexture, WebGL1Renderer, WebGL3DRenderTarget, WebGLArrayRenderTarget, WebGLCubeRenderTarget, WebGLMultipleRenderTargets, WebGLMultisampleRenderTarget, WebGLRenderTarget, WebGLRenderer, WebGLUtils, WireframeGeometry, WrapAroundEnding, ZeroCurvatureEnding, ZeroFactor, ZeroSlopeEnding, ZeroStencilOp, _SRGBAFormat, sRGBEncoding };
