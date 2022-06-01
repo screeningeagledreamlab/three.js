@@ -4,37 +4,35 @@ import { Mesh } from './Mesh.js';
  * @author simon paris / https://github.com/simon-paris
  */
 
-function OcclusionQueryMesh() {
+class OcclusionQueryMesh extends Mesh {
 
-	Mesh.apply( this, arguments );
+	constructor( geometry, material ) {
 
-	this.type = 'OcclusionQueryMesh';
+		super( geometry, material );
 
-	this.occlusionQueryCallback = null;
-	this.cameraFilter = null;
-	this.maxAliveQueries = 1;
+		this.isOcclusionQueryMesh = true;
 
-}
+		this.type = 'OcclusionQueryMesh';
 
-OcclusionQueryMesh.prototype = Object.assign( Object.create( Mesh.prototype ), {
+		this.occlusionQueryCallback = null;
+		this.cameraFilter = null;
+		this.maxAliveQueries = 1;
 
-	constructor: OcclusionQueryMesh,
+	}
 
-	isOcclusionQueryMesh: true,
-
-	pollQueries: function () {
+	pollQueries() {
 
 		this.dispatchEvent( { type: 'pollQueries' } );
 
-	},
+	};
 
-	dispose: function () {
+	dispose() {
 
 		this.dispatchEvent( { type: 'dispose' } );
 
 	}
 
-} );
+}
 
 
 export { OcclusionQueryMesh };
