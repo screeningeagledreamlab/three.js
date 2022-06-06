@@ -3081,7 +3081,7 @@ class GLTFParser {
 
 				console.log( 'GLTF.Loader: loader.isImageBitmapLoader', loader.isImageBitmapLoader );
 
-				if ( loader.isImageBitmapLoader === true ) {
+				/*if ( loader.isImageBitmapLoader === true ) {
 
 					onLoad = function ( imageBitmap ) {
 
@@ -3092,7 +3092,7 @@ class GLTFParser {
 
 					};
 
-				}
+				}*/
 
 				loader.load( LoaderUtils.resolveURL( sourceURI, options.path ), onLoad, undefined, reject );
 
