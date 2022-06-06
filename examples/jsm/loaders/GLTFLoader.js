@@ -3112,7 +3112,7 @@ class GLTFParser {
 
 		} ).catch( function ( error ) {
 
-			console.error( 'THREE.GLTFLoader: Couldn\'t load texture', sourceURI );
+			console.error( 'THREE.GLTFLoader: Couldn\'t load texture', sourceURI, error );
 			throw error;
 
 		} );
