@@ -1904,7 +1904,7 @@ function serializeImage(image) {
 		if (image.data) {
 			// images of DataTexture
 			return {
-				data: Array.prototype.slice.call(image.data),
+				data: Array.from(image.data),
 				width: image.width,
 				height: image.height,
 				type: image.data.constructor.name
@@ -7446,7 +7446,7 @@ class BufferAttribute {
 		const data = {
 			itemSize: this.itemSize,
 			type: this.array.constructor.name,
-			array: Array.prototype.slice.call(this.array),
+			array: Array.from(this.array),
 			normalized: this.normalized
 		};
 		if (this.name !== '') data.name = this.name;
@@ -15414,7 +15414,7 @@ function WebGLRenderState(extensions, capabilities) {
 function WebGLRenderStates(extensions, capabilities) {
 	let renderStates = new WeakMap();
 
-	function get(scene, renderCallDepth = 0) {
+	function get(scene, renderCallDepth) {
 		let renderState;
 
 		if (renderStates.has(scene) === false) {
@@ -20938,7 +20938,7 @@ class InterleavedBuffer {
 		}
 
 		if (data.arrayBuffers[this.array.buffer._uuid] === undefined) {
-			data.arrayBuffers[this.array.buffer._uuid] = Array.prototype.slice.call(new Uint32Array(this.array.buffer));
+			data.arrayBuffers[this.array.buffer._uuid] = Array.from(new Uint32Array(this.array.buffer));
 		} //
 
 
