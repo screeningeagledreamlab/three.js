@@ -3079,6 +3079,8 @@ class GLTFParser {
 
 				let onLoad = resolve;
 
+				console.log( 'GLTF.Loader: loader.isImageBitmapLoader', loader.isImageBitmapLoader );
+
 				if ( loader.isImageBitmapLoader === true ) {
 
 					onLoad = function ( imageBitmap ) {
